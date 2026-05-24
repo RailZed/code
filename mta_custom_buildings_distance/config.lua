@@ -32,21 +32,22 @@ Config.models = {
 --   ВЦЕЛОМ (террейн, воду, машины, пешеходов и т.д.), а не только
 --   твои здания.
 --
---   Поэтому стартуем с мягких 600. Если зданий далеко всё ещё не видно
---   — поднимай командой /bfar 800, /bfar 1000 и т.д., пока не найдёшь
---   баланс между «видно/FPS».
+--   Стартуем с компромиссных 500 — это заметно дальше дефолтных 300
+--   и при этом не разрывает FPS в клочья. Если хочется ещё дальше —
+--   поднимай командой /bfar 600, /bfar 700 и т.д., следя за FPS.
 --
 --   Если поставить 0 — скрипт вообще не трогает farClipDistance.
 
-Config.farClipDistance = 600
-Config.fogDistance     = 550
+Config.farClipDistance = 500
+Config.fogDistance     = 450
 
 -- LOD distance именно для твоих моделей. Должен быть <= farClipDistance.
-Config.modelLODDistance = 600
+Config.modelLODDistance = 500
 
--- Удерживать far clip / fog (другие ресурсы могут их сбрасывать)
+-- Удерживать far clip / fog (другие ресурсы могут их сбрасывать).
+-- enforceIntervalMs реже = меньше лишней работы каждый кадр-около.
 Config.keepFarClipEnforced = true
-Config.enforceIntervalMs   = 1000
+Config.enforceIntervalMs   = 2000
 
 -- ===================================================================
 -- Тонкая настройка
