@@ -1,8 +1,10 @@
 -- =====================================================================
--- Применение LOD distance к кастомным моделям
+-- Автоматическое применение LOD distance к моделям объектов на карте
 -- =====================================================================
 
-local applied = {}  -- [modelId] = distance, чтобы не дёргать движок повторно
+local applied = {}   -- [modelId] = true, чтобы не дёргать движок повторно
+local excludeSet = {}
+local totalApplied = 0
 
 local function dbg(fmt, ...)
     if Config.debug then
@@ -10,69 +12,72 @@ local function dbg(fmt, ...)
     end
 end
 
-local function applyOne(entry)
-    local id = entry.model
-    if type(id) ~= "number" then return false end
-
-    local distance = entry.distance or Config.defaultLODDistance
-
-    -- Привязка отдельной LOD-модели, если она указана
-    if entry.lodModel and type(entry.lodModel) == "number" then
-        -- engineSetModelLODDistance применится и к LOD-модели тоже,
-        -- иначе она исчезнет раньше основной.
-        if engineSetModelLODDistance then
-            engineSetModelLODDistance(entry.lodModel, distance)
-        end
+local function rebuildExclude()
+    excludeSet = {}
+    for _, id in ipairs(Config.exclude or {}) do
+        excludeSet[id] = true
     end
+end
 
-    if not engineSetModelLODDistance then
-        dbg("engineSetModelLODDistance недоступна в этой версии MTA")
-        return false
+local function applyModel(modelId)
+    if type(modelId) ~= "number" or modelId <= 0 then return end
+    if applied[modelId] then return end
+    if excludeSet[modelId] then return end
+    if not engineSetModelLODDistance then return end
+
+    if engineSetModelLODDistance(modelId, Config.distance) then
+        applied[modelId] = true
+        totalApplied = totalApplied + 1
+        dbg("model %d -> LOD %d", modelId, Config.distance)
     end
+end
 
-    local ok = engineSetModelLODDistance(id, distance)
-    if ok then
-        applied[id] = distance
-        dbg("model %d -> LOD distance %d", id, distance)
+local function targetTypes()
+    if Config.target == "all" then
+        return { "object", "building" }
+    elseif Config.target == "building" then
+        return { "building" }
     else
-        dbg("не удалось применить LOD для model %d", id)
+        return { "object" }
     end
-    return ok
 end
 
 local function applyAll()
-    for _, entry in ipairs(Config.models) do
-        applyOne(entry)
+    for _, et in ipairs(targetTypes()) do
+        for _, el in ipairs(getElementsByType(et)) do
+            applyModel(getElementModel(el))
+        end
     end
+    dbg("initial sweep: %d unique models", totalApplied)
 end
 
--- Старт ресурса
 addEventHandler("onClientResourceStart", resourceRoot, function()
+    rebuildExclude()
     if Config.applyOnResourceStart then
         applyAll()
     end
 end)
 
--- Переприменяем, когда модель реально стримится в память
--- (на случай, если другой ресурс сбрасывает LOD при перезамене модели)
-if Config.applyOnModelLoad then
+if Config.applyOnStreamIn then
     addEventHandler("onClientElementStreamIn", root, function()
-        local el = source
-        local et = getElementType(el)
-        if et ~= "object" and et ~= "building" then return end
-        local id = getElementModel(el)
-        for _, entry in ipairs(Config.models) do
-            if entry.model == id and applied[id] ~= (entry.distance or Config.defaultLODDistance) then
-                applyOne(entry)
-                break
-            end
-        end
+        local et = getElementType(source)
+        if Config.target == "object"   and et ~= "object"  then return end
+        if Config.target == "building" and et ~= "building" then return end
+        if Config.target == "all" and et ~= "object" and et ~= "building" then return end
+        applyModel(getElementModel(source))
     end)
 end
 
--- Экспортируемое API, если другой ресурс захочет управлять списком динамически
-function setBuildingLODDistance(modelId, distance)
-    if type(modelId) ~= "number" then return false end
-    distance = tonumber(distance) or Config.defaultLODDistance
-    return applyOne({ model = modelId, distance = distance })
+-- Экспортируемое API на случай если другой ресурс захочет руками задать дистанцию
+function setBuildingsDistance(distance)
+    distance = tonumber(distance)
+    if not distance then return false end
+    Config.distance = distance
+    -- Переприменяем ко всем уже обработанным моделям
+    for id in pairs(applied) do
+        engineSetModelLODDistance(id, distance)
+    end
+    -- И досканируем карту на случай новых моделей
+    applyAll()
+    return true
 end
