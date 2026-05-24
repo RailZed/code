@@ -1,27 +1,24 @@
 -- =====================================================================
--- Custom buildings distance — клиентская часть
+-- Custom buildings distance — режим «по ID»
 -- =====================================================================
 --
--- Логика основана на классическом подходе IIYAMA (setLowLODElement),
--- но с фиксами FPS:
---   * engineSetModelLODDistance берётся из конфига (1500), а не 99000.
---   * Мелкие/прозрачные/исключённые модели НЕ дублируются.
---   * Создание LOD идёт чанками через корутину (нет фриза при старте).
+-- Работает ТОЛЬКО с model ID из Config.models. Всё остальное на карте
+-- не трогаем — FPS остаётся как был.
 --
--- Структура хранения:
---   resourcesData[res] = {
---     parent     = element,   -- родитель всех LOD'ов этого ресурса
---     lodObjects = {[obj]=lod},
---     coro       = coroutine,
---     timer      = timer,
---     stats      = {created=N, skipped=M},
---   }
+-- Что делаем:
+--   1. setFarClipDistance / setFogDistance — растягиваем горизонт.
+--   2. Для каждого object на карте, чья модель есть в Config.models:
+--        - создаём LOD-клон (setLowLODElement) — это и есть то, что
+--          заставляет MTA рисовать его дальше 300 м.
+--   3. engineSetModelLODDistance(model, Config.modelLODDistance, true)
+--      только для этих model ID.
 -- =====================================================================
 
-local resourcesData       = {}
-local appliedModels       = {}
-local excludeModelSet     = {}
-local globalStats         = { created = 0, skipped = 0, models = 0, resources = 0 }
+local modelSet           = {}    -- [modelId] = true (из Config.models)
+local lodClones          = setmetatable({}, { __mode = "k" })  -- [object] = lodObject
+local appliedModels      = {}
+local lodParent          = nil
+local stats              = { created = 0, models = 0, missing = 0 }
 
 local function chatLog(r, g, b, fmt, ...)
     outputChatBox("[buildings-distance] " .. fmt:format(...), r, g, b)
@@ -33,10 +30,12 @@ local function dbg(fmt, ...)
     end
 end
 
-local function rebuildExclude()
-    excludeModelSet = {}
-    for _, id in ipairs(Config.excludeModels or {}) do
-        excludeModelSet[id] = true
+local function rebuildModelSet()
+    modelSet = {}
+    for _, id in ipairs(Config.models or {}) do
+        if type(id) == "number" and id > 0 then
+            modelSet[id] = true
+        end
     end
 end
 
@@ -54,13 +53,11 @@ local function enforceFarClip()
 end
 
 -- ----------------------------------------------------------------------
--- Model-level LOD limit
+-- Model-level LOD distance (для указанных в конфиге model ID)
 -- ----------------------------------------------------------------------
 
 local function applyModelLOD(modelId)
-    if type(modelId) ~= "number" or modelId <= 0 then return end
     if appliedModels[modelId] then return end
-    if excludeModelSet[modelId] then return end
     if not engineSetModelLODDistance then return end
 
     local ok = pcall(engineSetModelLODDistance, modelId, Config.modelLODDistance, true)
@@ -68,46 +65,30 @@ local function applyModelLOD(modelId)
         engineSetModelLODDistance(modelId, Config.modelLODDistance)
     end
     appliedModels[modelId] = true
-    globalStats.models = globalStats.models + 1
+    stats.models = stats.models + 1
 end
 
 -- ----------------------------------------------------------------------
--- Создание LOD-клона для одного объекта
+-- LOD-клон одного объекта
 -- ----------------------------------------------------------------------
 
-local function shouldSkip(object)
-    if not isElement(object) then return true end
-    if getElementType(object) ~= "object" then return true end
+local function makeLOD(object)
+    if not isElement(object) then return end
+    if getElementType(object) ~= "object" then return end
+    if lodClones[object] then return end
 
     local model = getElementModel(object)
-    if excludeModelSet[model] then return true end
+    if not modelSet[model] then return end  -- не наш ID — игнорируем
 
-    if Config.skipTransparent and getElementAlpha(object) < 255 then
-        return true
-    end
-
-    local scale = getObjectScale(object) or 1
-    if scale < (Config.minScale or 1.0) then
-        return true
-    end
-
-    return false
-end
-
-local function createLODFor(object, parentElement)
-    if shouldSkip(object) then
-        globalStats.skipped = globalStats.skipped + 1
-        return nil
-    end
-
-    local model      = getElementModel(object)
     local x, y, z    = getElementPosition(object)
     local rx, ry, rz = getElementRotation(object)
 
-    local lod = createObject(model, x, y, z, rx, ry, rz, true) -- true = low-LOD object
-    if not lod then return nil end
+    local lod = createObject(model, x, y, z, rx, ry, rz, true)  -- low-LOD
+    if not lod then return end
 
-    setElementParent(lod, parentElement)
+    if lodParent and isElement(lodParent) then
+        setElementParent(lod, lodParent)
+    end
 
     local interior = getElementInterior(object)
     if interior ~= 0 then setElementInterior(lod, interior) end
@@ -125,127 +106,28 @@ local function createLODFor(object, parentElement)
 
     setLowLODElement(object, lod)
     applyModelLOD(model)
-    globalStats.created = globalStats.created + 1
-
-    return lod
+    lodClones[object] = lod
+    stats.created = stats.created + 1
 end
 
 -- ----------------------------------------------------------------------
--- Корутина: обработка объектов одного ресурса чанками
+-- Сканирование всех существующих object'ов
 -- ----------------------------------------------------------------------
 
-local function processResourceCoroutine(res, parentElement, objects, lodMap)
-    local budgetMs = math.max(1, Config.processBudgetMs or 2)
-    local deadline = getTickCount() + budgetMs
-
-    for i = 1, #objects do
-        local obj = objects[i]
-        if isElement(obj) and not lodMap[obj] then
-            local lod = createLODFor(obj, parentElement)
-            if lod then lodMap[obj] = lod end
-        end
-
-        if getTickCount() > deadline then
-            coroutine.yield()
-            deadline = getTickCount() + budgetMs
-        end
-    end
-end
-
-local function pumpResource(res)
-    local data = resourcesData[res]
-    if not data or not data.coro then return end
-
-    if coroutine.status(data.coro) == "dead" then
-        data.timer = nil
-        return
-    end
-
-    local ok, err = coroutine.resume(data.coro)
-    if not ok then
-        outputDebugString("[buildings-distance] coroutine error: " .. tostring(err), 1)
-        data.coro = nil
-        return
-    end
-
-    if coroutine.status(data.coro) ~= "dead" then
-        data.timer = setTimer(pumpResource, 50, 1, res)
-    else
-        data.timer = nil
-        dbg("resource %s: done (created=%d, skipped=%d)",
-            tostring(getResourceName(res) or "?"),
-            globalStats.created, globalStats.skipped)
+local function scanAll()
+    if not next(modelSet) then return end
+    for _, obj in ipairs(getElementsByType("object")) do
+        makeLOD(obj)
     end
 end
 
 -- ----------------------------------------------------------------------
--- Загрузка / выгрузка ресурса
--- ----------------------------------------------------------------------
-
-local function loadResource(res, thisResourceRoot)
-    if resourcesData[res] then return end
-    if not thisResourceRoot or not isElement(thisResourceRoot) then return end
-
-    local parent = createElement("buildingsLODParent")
-    local lodMap = {}
-    local allObjects = {}
-
-    -- Берём объекты из всех .map в ресурсе
-    local mapRoots = getElementsByType("map", thisResourceRoot)
-    if mapRoots and #mapRoots > 0 then
-        for i = 1, #mapRoots do
-            local objs = getElementsByType("object", mapRoots[i])
-            for j = 1, #objs do allObjects[#allObjects + 1] = objs[j] end
-        end
-    end
-
-    -- А также object'ы, созданные скриптами ресурса напрямую под рутом
-    do
-        local objs = getElementsByType("object", thisResourceRoot)
-        for j = 1, #objs do allObjects[#allObjects + 1] = objs[j] end
-    end
-
-    if #allObjects == 0 then
-        destroyElement(parent)
-        return
-    end
-
-    local data = {
-        parent     = parent,
-        lodObjects = lodMap,
-        coro       = coroutine.create(processResourceCoroutine),
-    }
-    resourcesData[res] = data
-    globalStats.resources = globalStats.resources + 1
-
-    -- Стартуем корутину
-    local ok = coroutine.resume(data.coro, res, parent, allObjects, lodMap)
-    if coroutine.status(data.coro) ~= "dead" then
-        data.timer = setTimer(pumpResource, 50, 1, res)
-    end
-end
-
-local function unloadResource(res)
-    local data = resourcesData[res]
-    if not data then return end
-    resourcesData[res] = nil
-
-    if data.timer and isTimer(data.timer) then
-        killTimer(data.timer)
-    end
-
-    if isElement(data.parent) then
-        destroyElement(data.parent)  -- удалит весь LOD-дочерний слой одним махом
-    end
-end
-
--- ----------------------------------------------------------------------
--- Поломка / стриминг (как у IIYAMA — чтобы LOD скрывался когда основной объект сломан, и появлялся когда тот выгружается)
+-- События стримминга / поломки (стандартная пара для LOD-клонов)
 -- ----------------------------------------------------------------------
 
 addEventHandler("onClientObjectBreak", root, function()
     local lod = getLowLODElement(source)
-    if lod and isElement(lod) then
+    if lod and lodClones[source] then
         setElementAlpha(lod, 0)
     end
 end)
@@ -254,68 +136,111 @@ addEventHandler("onClientElementStreamOut", root, function()
     if getElementType(source) ~= "object" then return end
     if not isObjectBreakable(source) then return end
     local lod = getLowLODElement(source)
-    if lod and isElement(lod) then
+    if lod and lodClones[source] then
         setElementAlpha(lod, 255)
     end
 end)
 
+-- Ловим новые объекты, появившиеся после старта
+if Config.applyOnStreamIn then
+    addEventHandler("onClientElementStreamIn", root, function()
+        if getElementType(source) ~= "object" then return end
+        makeLOD(source)
+    end)
+end
+
+addEventHandler("onClientElementCreate", root, function()
+    if getElementType(source) ~= "object" then return end
+    makeLOD(source)
+end)
+
 -- ----------------------------------------------------------------------
--- Старт ресурса / стоп ресурса
+-- Старт ресурса
 -- ----------------------------------------------------------------------
 
-addEventHandler("onClientResourceStart", root, function(res)
-    if res == resource then
-        rebuildExclude()
-        enforceFarClip()
-        if Config.keepFarClipEnforced then
-            setTimer(enforceFarClip, Config.enforceIntervalMs or 1000, 0)
-        end
+addEventHandler("onClientResourceStart", resourceRoot, function()
+    rebuildModelSet()
+    lodParent = createElement("buildingsLODParent")
 
-        -- Подгружаем уже стартовавшие ресурсы
-        local resourceRoots = getElementsByType("resource")
-        for i = 1, #resourceRoots do
-            local rRoot = resourceRoots[i]
-            local rName = getElementID(rRoot)
-            if rName then
-                local r = getResourceFromName(rName)
-                if r and r ~= resource and getResourceState(r) == "running" then
-                    loadResource(r, rRoot)
-                end
+    enforceFarClip()
+    if Config.keepFarClipEnforced then
+        setTimer(enforceFarClip, Config.enforceIntervalMs or 1000, 0)
+    end
+
+    if not next(modelSet) then
+        chatLog(255, 200, 0,
+            "Config.models пустой — впиши свои model ID в config.lua")
+        return
+    end
+
+    -- Применим LOD distance ко всем заявленным model ID,
+    -- даже если объекта пока нет на карте — модель станет «дальнобойной»
+    -- сразу, как только заспавнится.
+    for id in pairs(modelSet) do
+        applyModelLOD(id)
+    end
+
+    if Config.applyOnResourceStart then
+        scanAll()
+        -- ещё пара проходов для ресурсов, которые стартуют позже
+        setTimer(scanAll, 2000,  1)
+        setTimer(scanAll, 5000,  1)
+        setTimer(scanAll, 15000, 1)
+    end
+
+    if Config.announceInChat then
+        setTimer(function()
+            chatLog(0, 220, 120,
+                "farClip=%d fog=%d modelLOD=%d | ids=%d models=%d created=%d",
+                Config.farClipDistance, Config.fogDistance, Config.modelLODDistance,
+                (function() local n=0 for _ in pairs(modelSet) do n=n+1 end return n end)(),
+                stats.models, stats.created)
+            if stats.created == 0 then
+                chatLog(255, 200, 0,
+                    "0 LOD создано — на карте нет ни одного object с указанными ID. Проверь Config.models.")
             end
-        end
-
-        if Config.announceInChat then
-            setTimer(function()
-                chatLog(0, 220, 120,
-                    "farClip=%d fog=%d modelLOD=%d | resources=%d models=%d created=%d skipped=%d",
-                    Config.farClipDistance, Config.fogDistance, Config.modelLODDistance,
-                    globalStats.resources, globalStats.models,
-                    globalStats.created, globalStats.skipped)
-                if globalStats.created == 0 then
-                    chatLog(255, 200, 0,
-                        "Ни одного LOD не создано — нет .map с объектами в других ресурсах.")
-                end
-            end, 8000, 1)
-        end
-    else
-        if Config.applyOnResourceStart then
-            loadResource(res, source)
-        end
+        end, 6000, 1)
     end
 end)
 
-addEventHandler("onClientResourceStop", root, function(res)
-    if res == resource then
-        -- Чистим всё
-        for r in pairs(resourcesData) do unloadResource(r) end
-    else
-        unloadResource(res)
+addEventHandler("onClientResourceStop", resourceRoot, function()
+    if isElement(lodParent) then
+        destroyElement(lodParent)
     end
 end)
 
 -- ----------------------------------------------------------------------
 -- API
 -- ----------------------------------------------------------------------
+
+function addBuildingModel(modelId)
+    modelId = tonumber(modelId)
+    if not modelId then return false end
+    if modelSet[modelId] then return true end
+    modelSet[modelId] = true
+    table.insert(Config.models, modelId)
+    applyModelLOD(modelId)
+    scanAll()
+    return true
+end
+
+function removeBuildingModel(modelId)
+    modelId = tonumber(modelId)
+    if not modelId then return false end
+    modelSet[modelId] = nil
+    for i, id in ipairs(Config.models) do
+        if id == modelId then table.remove(Config.models, i) break end
+    end
+    -- Удалим LOD'ы у объектов с этим ID
+    for obj, lod in pairs(lodClones) do
+        if isElement(obj) and getElementModel(obj) == modelId then
+            setLowLODElement(obj, nil)
+            if isElement(lod) then destroyElement(lod) end
+            lodClones[obj] = nil
+        end
+    end
+    return true
+end
 
 function setBuildingsFarClip(distance)
     distance = tonumber(distance)
@@ -337,35 +262,19 @@ function setBuildingsLOD(distance)
     return true
 end
 
-function rebuildAllLODs()
-    -- На случай если хочется пересоздать все LOD'ы с новыми фильтрами
-    for r in pairs(resourcesData) do unloadResource(r) end
-    globalStats = { created = 0, skipped = 0, models = 0, resources = 0 }
-    appliedModels = {}
-    rebuildExclude()
-
-    local resourceRoots = getElementsByType("resource")
-    for i = 1, #resourceRoots do
-        local rRoot = resourceRoots[i]
-        local rName = getElementID(rRoot)
-        if rName then
-            local r = getResourceFromName(rName)
-            if r and r ~= resource and getResourceState(r) == "running" then
-                loadResource(r, rRoot)
-            end
-        end
-    end
+function rescanBuildings()
+    scanAll()
 end
 
 function getBuildingsStatus()
+    local idCount = 0
+    for _ in pairs(modelSet) do idCount = idCount + 1 end
     return {
         farClipDistance  = Config.farClipDistance,
         fogDistance      = Config.fogDistance,
         modelLODDistance = Config.modelLODDistance,
-        minScale         = Config.minScale,
-        resources        = globalStats.resources,
-        models           = globalStats.models,
-        created          = globalStats.created,
-        skipped          = globalStats.skipped,
+        idsConfigured    = idCount,
+        modelsApplied    = stats.models,
+        lodCreated       = stats.created,
     }
 end

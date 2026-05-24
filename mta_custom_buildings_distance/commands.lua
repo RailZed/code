@@ -1,13 +1,38 @@
 -- =====================================================================
--- Команды для подбора параметров вживую
+-- Команды
 -- =====================================================================
 --
---   /bfar  <distance>   — горизонт камеры       (например /bfar 1500)
---   /blod  <distance>   — LOD distance моделей  (например /blod 1500)
---   /bscale <value>     — минимальный scale (мельче — без LOD)
---   /brebuild           — пересоздать все LOD'ы с новыми настройками
---   /binfo              — статус
+--   /badd <modelId>       — добавить ID в список (сразу применится)
+--   /bdel <modelId>       — убрать ID
+--   /bfar <distance>      — горизонт камеры
+--   /blod <distance>      — LOD distance для всех ID
+--   /bscan                — пересканировать (например после спавна новых)
+--   /binfo                — статус
 --
+
+addCommandHandler("badd", function(_, idArg)
+    local id = tonumber(idArg)
+    if not id then
+        outputChatBox("Usage: /badd <modelId>", 255, 200, 0)
+        return
+    end
+    if addBuildingModel(id) then
+        outputChatBox(("+ model %d added"):format(id), 0, 255, 0)
+    else
+        outputChatBox("failed", 255, 0, 0)
+    end
+end)
+
+addCommandHandler("bdel", function(_, idArg)
+    local id = tonumber(idArg)
+    if not id then
+        outputChatBox("Usage: /bdel <modelId>", 255, 200, 0)
+        return
+    end
+    if removeBuildingModel(id) then
+        outputChatBox(("- model %d removed"):format(id), 0, 255, 0)
+    end
+end)
 
 addCommandHandler("bfar", function(_, distArg)
     local d = tonumber(distArg)
@@ -29,26 +54,16 @@ addCommandHandler("blod", function(_, distArg)
     outputChatBox(("modelLOD -> %d"):format(d), 0, 255, 0)
 end)
 
-addCommandHandler("bscale", function(_, val)
-    local v = tonumber(val)
-    if not v then
-        outputChatBox("Usage: /bscale <value>   (0=без фильтра, 1=по умолчанию, 2=только крупные)", 255, 200, 0)
-        return
-    end
-    Config.minScale = v
-    outputChatBox(("minScale -> %.2f (применится после /brebuild)"):format(v), 0, 255, 0)
-end)
-
-addCommandHandler("brebuild", function()
-    outputChatBox("Rebuilding LODs...", 200, 220, 255)
-    rebuildAllLODs()
+addCommandHandler("bscan", function()
+    rescanBuildings()
+    outputChatBox("re-scanned", 0, 255, 0)
 end)
 
 addCommandHandler("binfo", function()
     local s = getBuildingsStatus()
     outputChatBox(
-        ("farClip=%d fog=%d modelLOD=%d minScale=%.2f | resources=%d models=%d created=%d skipped=%d")
-        :format(s.farClipDistance, s.fogDistance, s.modelLODDistance, s.minScale,
-                s.resources, s.models, s.created, s.skipped),
+        ("farClip=%d fog=%d modelLOD=%d | ids=%d models=%d created=%d")
+        :format(s.farClipDistance, s.fogDistance, s.modelLODDistance,
+                s.idsConfigured, s.modelsApplied, s.lodCreated),
         200, 220, 255)
 end)
