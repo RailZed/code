@@ -2,31 +2,26 @@
 -- Custom buildings distance — клиентская часть
 -- =====================================================================
 --
--- Что мы делаем (по убыванию важности для видимости):
+-- Логика основана на классическом подходе IIYAMA (setLowLODElement),
+-- но с фиксами FPS:
+--   * engineSetModelLODDistance берётся из конфига (1500), а не 99000.
+--   * Мелкие/прозрачные/исключённые модели НЕ дублируются.
+--   * Создание LOD идёт чанками через корутину (нет фриза при старте).
 --
---   1. setElementStreamable(obj, false)
---      — снимает MTA-стримминг с КАЖДОГО кастомного `object`-элемента.
---        Это и есть то, чего не хватало: без этого MTA сам убирает
---        объект из сцены за ~300 м, и никакие LOD/far clip не помогут.
---
---   2. setFarClipDistance + setFogDistance
---      — растягиваем горизонт камеры. Без этого даже всегда-в-сцене
---        объект всё равно не нарисуется.
---
---   3. engineSetModelLODDistance(model, d, true)
---      — снимаем стоковый лимит 170 на конкретной модели.
---
--- FPS не страдает: ванильные `building`-элементы остаются с дефолтным
--- model LOD ~170, то есть весь Лос-Сантос по-прежнему отсекается на
--- 170 м. Видно далеко только то, что мы сами разрешили.
+-- Структура хранения:
+--   resourcesData[res] = {
+--     parent     = element,   -- родитель всех LOD'ов этого ресурса
+--     lodObjects = {[obj]=lod},
+--     coro       = coroutine,
+--     timer      = timer,
+--     stats      = {created=N, skipped=M},
+--   }
 -- =====================================================================
 
-local appliedModels      = {}     -- [modelId] = true
-local streamedElements   = setmetatable({}, { __mode = "k" })  -- weak keys
-local excludeSet         = {}
-local totalModelsApplied = 0
-local totalElementsSeen  = 0
-local totalElementsForced= 0
+local resourcesData       = {}
+local appliedModels       = {}
+local excludeModelSet     = {}
+local globalStats         = { created = 0, skipped = 0, models = 0, resources = 0 }
 
 local function chatLog(r, g, b, fmt, ...)
     outputChatBox("[buildings-distance] " .. fmt:format(...), r, g, b)
@@ -39,9 +34,9 @@ local function dbg(fmt, ...)
 end
 
 local function rebuildExclude()
-    excludeSet = {}
-    for _, id in ipairs(Config.exclude or {}) do
-        excludeSet[id] = true
+    excludeModelSet = {}
+    for _, id in ipairs(Config.excludeModels or {}) do
+        excludeModelSet[id] = true
     end
 end
 
@@ -59,153 +54,262 @@ local function enforceFarClip()
 end
 
 -- ----------------------------------------------------------------------
--- Model-level LOD
+-- Model-level LOD limit
 -- ----------------------------------------------------------------------
 
 local function applyModelLOD(modelId)
-    if type(modelId) ~= "number" or modelId <= 0 then return false end
-    if appliedModels[modelId] then return true end
-    if excludeSet[modelId] then return false end
-    if not engineSetModelLODDistance then return false end
+    if type(modelId) ~= "number" or modelId <= 0 then return end
+    if appliedModels[modelId] then return end
+    if excludeModelSet[modelId] then return end
+    if not engineSetModelLODDistance then return end
 
-    local ok, ret = pcall(engineSetModelLODDistance, modelId, Config.modelLODDistance, true)
-    if not ok or ret == false then
-        ok = engineSetModelLODDistance(modelId, Config.modelLODDistance)
+    local ok = pcall(engineSetModelLODDistance, modelId, Config.modelLODDistance, true)
+    if not ok then
+        engineSetModelLODDistance(modelId, Config.modelLODDistance)
     end
-    if ok then
-        appliedModels[modelId] = true
-        totalModelsApplied = totalModelsApplied + 1
-        dbg("model %d -> LOD %d", modelId, Config.modelLODDistance)
-        return true
-    end
-    return false
+    appliedModels[modelId] = true
+    globalStats.models = globalStats.models + 1
 end
 
 -- ----------------------------------------------------------------------
--- Per-element: вырубаем MTA-стримминг (главный фикс)
+-- Создание LOD-клона для одного объекта
 -- ----------------------------------------------------------------------
 
-local function forceAlwaysStreamed(el)
-    if not isElement(el) then return false end
-    if streamedElements[el] then return true end
-    if excludeSet[getElementModel(el)] then return false end
-    if not setElementStreamable then return false end
+local function shouldSkip(object)
+    if not isElement(object) then return true end
+    if getElementType(object) ~= "object" then return true end
 
-    if setElementStreamable(el, false) then
-        streamedElements[el] = true
-        totalElementsForced = totalElementsForced + 1
+    local model = getElementModel(object)
+    if excludeModelSet[model] then return true end
+
+    if Config.skipTransparent and getElementAlpha(object) < 255 then
         return true
     end
+
+    local scale = getObjectScale(object) or 1
+    if scale < (Config.minScale or 1.0) then
+        return true
+    end
+
     return false
 end
 
+local function createLODFor(object, parentElement)
+    if shouldSkip(object) then
+        globalStats.skipped = globalStats.skipped + 1
+        return nil
+    end
+
+    local model      = getElementModel(object)
+    local x, y, z    = getElementPosition(object)
+    local rx, ry, rz = getElementRotation(object)
+
+    local lod = createObject(model, x, y, z, rx, ry, rz, true) -- true = low-LOD object
+    if not lod then return nil end
+
+    setElementParent(lod, parentElement)
+
+    local interior = getElementInterior(object)
+    if interior ~= 0 then setElementInterior(lod, interior) end
+    local dimension = getElementDimension(object)
+    if dimension ~= 0 then setElementDimension(lod, dimension) end
+    if isElementDoubleSided(object) then setElementDoubleSided(lod, true) end
+
+    local scale = getObjectScale(object) or 1
+    if scale ~= 1 then setObjectScale(lod, scale) end
+
+    if isObjectBreakable(object) then
+        attachElements(lod, object)
+        setObjectBreakable(lod, false)
+    end
+
+    setLowLODElement(object, lod)
+    applyModelLOD(model)
+    globalStats.created = globalStats.created + 1
+
+    return lod
+end
+
 -- ----------------------------------------------------------------------
--- Скан карты
+-- Корутина: обработка объектов одного ресурса чанками
 -- ----------------------------------------------------------------------
 
-local function targetTypes()
-    if Config.target == "all" then
-        return { "object", "building" }
-    elseif Config.target == "building" then
-        return { "building" }
+local function processResourceCoroutine(res, parentElement, objects, lodMap)
+    local budgetMs = math.max(1, Config.processBudgetMs or 2)
+    local deadline = getTickCount() + budgetMs
+
+    for i = 1, #objects do
+        local obj = objects[i]
+        if isElement(obj) and not lodMap[obj] then
+            local lod = createLODFor(obj, parentElement)
+            if lod then lodMap[obj] = lod end
+        end
+
+        if getTickCount() > deadline then
+            coroutine.yield()
+            deadline = getTickCount() + budgetMs
+        end
+    end
+end
+
+local function pumpResource(res)
+    local data = resourcesData[res]
+    if not data or not data.coro then return end
+
+    if coroutine.status(data.coro) == "dead" then
+        data.timer = nil
+        return
+    end
+
+    local ok, err = coroutine.resume(data.coro)
+    if not ok then
+        outputDebugString("[buildings-distance] coroutine error: " .. tostring(err), 1)
+        data.coro = nil
+        return
+    end
+
+    if coroutine.status(data.coro) ~= "dead" then
+        data.timer = setTimer(pumpResource, 50, 1, res)
     else
-        return { "object" }
+        data.timer = nil
+        dbg("resource %s: done (created=%d, skipped=%d)",
+            tostring(getResourceName(res) or "?"),
+            globalStats.created, globalStats.skipped)
     end
 end
 
-local function applyAll()
-    totalElementsSeen = 0
-    for _, et in ipairs(targetTypes()) do
-        for _, el in ipairs(getElementsByType(et)) do
-            totalElementsSeen = totalElementsSeen + 1
-            applyModelLOD(getElementModel(el))
-            -- setElementStreamable имеет смысл только для object,
-            -- ванильные building и так часть мира движка.
-            if Config.forceObjectsAlwaysStreamed and et == "object" then
-                forceAlwaysStreamed(el)
-            end
+-- ----------------------------------------------------------------------
+-- Загрузка / выгрузка ресурса
+-- ----------------------------------------------------------------------
+
+local function loadResource(res, thisResourceRoot)
+    if resourcesData[res] then return end
+    if not thisResourceRoot or not isElement(thisResourceRoot) then return end
+
+    local parent = createElement("buildingsLODParent")
+    local lodMap = {}
+    local allObjects = {}
+
+    -- Берём объекты из всех .map в ресурсе
+    local mapRoots = getElementsByType("map", thisResourceRoot)
+    if mapRoots and #mapRoots > 0 then
+        for i = 1, #mapRoots do
+            local objs = getElementsByType("object", mapRoots[i])
+            for j = 1, #objs do allObjects[#allObjects + 1] = objs[j] end
         end
     end
-    dbg("sweep: %d elements, %d models, %d forced",
-        totalElementsSeen, totalModelsApplied, totalElementsForced)
+
+    -- А также object'ы, созданные скриптами ресурса напрямую под рутом
+    do
+        local objs = getElementsByType("object", thisResourceRoot)
+        for j = 1, #objs do allObjects[#allObjects + 1] = objs[j] end
+    end
+
+    if #allObjects == 0 then
+        destroyElement(parent)
+        return
+    end
+
+    local data = {
+        parent     = parent,
+        lodObjects = lodMap,
+        coro       = coroutine.create(processResourceCoroutine),
+    }
+    resourcesData[res] = data
+    globalStats.resources = globalStats.resources + 1
+
+    -- Стартуем корутину
+    local ok = coroutine.resume(data.coro, res, parent, allObjects, lodMap)
+    if coroutine.status(data.coro) ~= "dead" then
+        data.timer = setTimer(pumpResource, 50, 1, res)
+    end
+end
+
+local function unloadResource(res)
+    local data = resourcesData[res]
+    if not data then return end
+    resourcesData[res] = nil
+
+    if data.timer and isTimer(data.timer) then
+        killTimer(data.timer)
+    end
+
+    if isElement(data.parent) then
+        destroyElement(data.parent)  -- удалит весь LOD-дочерний слой одним махом
+    end
 end
 
 -- ----------------------------------------------------------------------
--- Старт
+-- Поломка / стриминг (как у IIYAMA — чтобы LOD скрывался когда основной объект сломан, и появлялся когда тот выгружается)
 -- ----------------------------------------------------------------------
 
-addEventHandler("onClientResourceStart", resourceRoot, function()
-    rebuildExclude()
-    enforceFarClip()
-
-    if not engineSetModelLODDistance then
-        chatLog(255, 100, 0,
-            "engineSetModelLODDistance недоступна — обнови MTA до 1.5.8+")
+addEventHandler("onClientObjectBreak", root, function()
+    local lod = getLowLODElement(source)
+    if lod and isElement(lod) then
+        setElementAlpha(lod, 0)
     end
-    if Config.forceObjectsAlwaysStreamed and not setElementStreamable then
-        chatLog(255, 100, 0,
-            "setElementStreamable недоступна в этом MTA — кастомные объекты не покажутся дальше 300м")
-    end
-
-    if Config.applyOnResourceStart then
-        applyAll()
-    end
-
-    setTimer(applyAll, 2000,  1)
-    setTimer(applyAll, 5000,  1)
-    setTimer(applyAll, 15000, 1)
-
-    if Config.keepFarClipEnforced then
-        setTimer(enforceFarClip, Config.enforceIntervalMs or 1000, 0)
-    end
-
-    setTimer(function()
-        chatLog(0, 220, 120,
-            "farClip=%d fog=%d modelLOD=%d target=%s | elements=%d models=%d forced=%d",
-            Config.farClipDistance or 0,
-            Config.fogDistance or 0,
-            Config.modelLODDistance or 0,
-            Config.target,
-            totalElementsSeen,
-            totalModelsApplied,
-            totalElementsForced)
-        if totalElementsSeen == 0 then
-            chatLog(255, 200, 0,
-                "Ни одного %s-элемента не найдено. Попробуй /blodtarget all.",
-                Config.target)
-        elseif totalElementsForced == 0 and Config.forceObjectsAlwaysStreamed then
-            chatLog(255, 200, 0,
-                "Ни одного объекта не зафорсили в сцену — возможно у тебя их нет как `object`. Попробуй /blodtarget all.")
-        end
-    end, 5500, 1)
 end)
 
-if Config.applyOnStreamIn then
-    addEventHandler("onClientElementStreamIn", root, function()
-        local et = getElementType(source)
-        local want = Config.target
-        if want == "object"   and et ~= "object"   then return end
-        if want == "building" and et ~= "building" then return end
-        if want == "all" and et ~= "object" and et ~= "building" then return end
+addEventHandler("onClientElementStreamOut", root, function()
+    if getElementType(source) ~= "object" then return end
+    if not isObjectBreakable(source) then return end
+    local lod = getLowLODElement(source)
+    if lod and isElement(lod) then
+        setElementAlpha(lod, 255)
+    end
+end)
 
-        applyModelLOD(getElementModel(source))
-        if Config.forceObjectsAlwaysStreamed and et == "object" then
-            forceAlwaysStreamed(source)
+-- ----------------------------------------------------------------------
+-- Старт ресурса / стоп ресурса
+-- ----------------------------------------------------------------------
+
+addEventHandler("onClientResourceStart", root, function(res)
+    if res == resource then
+        rebuildExclude()
+        enforceFarClip()
+        if Config.keepFarClipEnforced then
+            setTimer(enforceFarClip, Config.enforceIntervalMs or 1000, 0)
         end
-    end)
-end
 
--- Ловим вновь созданные объекты (на любом клиенте)
-addEventHandler("onClientElementCreate", root, function()
-    local el = source
-    local et = getElementType(el)
-    if et ~= "object" and et ~= "building" then return end
-    if Config.target == "object"   and et ~= "object"   then return end
-    if Config.target == "building" and et ~= "building" then return end
-    totalElementsSeen = totalElementsSeen + 1
-    applyModelLOD(getElementModel(el))
-    if Config.forceObjectsAlwaysStreamed and et == "object" then
-        forceAlwaysStreamed(el)
+        -- Подгружаем уже стартовавшие ресурсы
+        local resourceRoots = getElementsByType("resource")
+        for i = 1, #resourceRoots do
+            local rRoot = resourceRoots[i]
+            local rName = getElementID(rRoot)
+            if rName then
+                local r = getResourceFromName(rName)
+                if r and r ~= resource and getResourceState(r) == "running" then
+                    loadResource(r, rRoot)
+                end
+            end
+        end
+
+        if Config.announceInChat then
+            setTimer(function()
+                chatLog(0, 220, 120,
+                    "farClip=%d fog=%d modelLOD=%d | resources=%d models=%d created=%d skipped=%d",
+                    Config.farClipDistance, Config.fogDistance, Config.modelLODDistance,
+                    globalStats.resources, globalStats.models,
+                    globalStats.created, globalStats.skipped)
+                if globalStats.created == 0 then
+                    chatLog(255, 200, 0,
+                        "Ни одного LOD не создано — нет .map с объектами в других ресурсах.")
+                end
+            end, 8000, 1)
+        end
+    else
+        if Config.applyOnResourceStart then
+            loadResource(res, source)
+        end
+    end
+end)
+
+addEventHandler("onClientResourceStop", root, function(res)
+    if res == resource then
+        -- Чистим всё
+        for r in pairs(resourcesData) do unloadResource(r) end
+    else
+        unloadResource(res)
     end
 end)
 
@@ -230,53 +334,38 @@ function setBuildingsLOD(distance)
         local ok = pcall(engineSetModelLODDistance, id, distance, true)
         if not ok then engineSetModelLODDistance(id, distance) end
     end
-    applyAll()
     return true
 end
 
-function setBuildingsTarget(target)
-    if target ~= "object" and target ~= "building" and target ~= "all" then
-        return false
-    end
-    Config.target = target
+function rebuildAllLODs()
+    -- На случай если хочется пересоздать все LOD'ы с новыми фильтрами
+    for r in pairs(resourcesData) do unloadResource(r) end
+    globalStats = { created = 0, skipped = 0, models = 0, resources = 0 }
     appliedModels = {}
-    streamedElements = setmetatable({}, { __mode = "k" })
-    totalModelsApplied = 0
-    totalElementsForced = 0
-    applyAll()
-    return true
-end
+    rebuildExclude()
 
-function setBuildingsForceStreamed(enabled)
-    Config.forceObjectsAlwaysStreamed = (enabled == true) or (enabled == "on") or (enabled == "1")
-    if Config.forceObjectsAlwaysStreamed then
-        applyAll()
-    else
-        -- Вернуть нормальный стримминг
-        for el in pairs(streamedElements) do
-            if isElement(el) then
-                setElementStreamable(el, true)
+    local resourceRoots = getElementsByType("resource")
+    for i = 1, #resourceRoots do
+        local rRoot = resourceRoots[i]
+        local rName = getElementID(rRoot)
+        if rName then
+            local r = getResourceFromName(rName)
+            if r and r ~= resource and getResourceState(r) == "running" then
+                loadResource(r, rRoot)
             end
         end
-        streamedElements = setmetatable({}, { __mode = "k" })
-        totalElementsForced = 0
     end
-    return Config.forceObjectsAlwaysStreamed
-end
-
-function rescanBuildings()
-    applyAll()
 end
 
 function getBuildingsStatus()
     return {
-        farClipDistance         = Config.farClipDistance,
-        fogDistance             = Config.fogDistance,
-        modelLODDistance        = Config.modelLODDistance,
-        target                  = Config.target,
-        forceObjectsAlwaysStreamed = Config.forceObjectsAlwaysStreamed,
-        elementsSeen            = totalElementsSeen,
-        modelsApplied           = totalModelsApplied,
-        elementsForced          = totalElementsForced,
+        farClipDistance  = Config.farClipDistance,
+        fogDistance      = Config.fogDistance,
+        modelLODDistance = Config.modelLODDistance,
+        minScale         = Config.minScale,
+        resources        = globalStats.resources,
+        models           = globalStats.models,
+        created          = globalStats.created,
+        skipped          = globalStats.skipped,
     }
 end

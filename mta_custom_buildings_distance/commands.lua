@@ -1,65 +1,54 @@
 -- =====================================================================
--- Команды
+-- Команды для подбора параметров вживую
 -- =====================================================================
 --
---   /bfar  <distance>                  — горизонт камеры
---   /blod  <distance>                  — LOD distance кастомных моделей
---   /blodtarget <object|building|all>  — что обрабатывать
---   /blodforce <on|off>                — форсить object'ы в сцену (главное!)
---   /blodscan                          — пересканировать
---   /blodinfo                          — статус
+--   /bfar  <distance>   — горизонт камеры       (например /bfar 1500)
+--   /blod  <distance>   — LOD distance моделей  (например /blod 1500)
+--   /bscale <value>     — минимальный scale (мельче — без LOD)
+--   /brebuild           — пересоздать все LOD'ы с новыми настройками
+--   /binfo              — статус
 --
 
 addCommandHandler("bfar", function(_, distArg)
-    local dist = tonumber(distArg)
-    if not dist then
-        outputChatBox("Usage: /bfar <distance>   (например /bfar 1500)", 255, 200, 0)
+    local d = tonumber(distArg)
+    if not d then
+        outputChatBox("Usage: /bfar <distance>", 255, 200, 0)
         return
     end
-    setBuildingsFarClip(dist)
-    outputChatBox(("farClipDistance -> %d (fog %d)"):format(dist, math.max(50, dist - 100)),
-        0, 255, 0)
+    setBuildingsFarClip(d)
+    outputChatBox(("farClip -> %d (fog %d)"):format(d, math.max(50, d - 100)), 0, 255, 0)
 end)
 
 addCommandHandler("blod", function(_, distArg)
-    local dist = tonumber(distArg)
-    if not dist then
-        outputChatBox("Usage: /blod <distance>   (например /blod 1400)", 255, 200, 0)
+    local d = tonumber(distArg)
+    if not d then
+        outputChatBox("Usage: /blod <distance>", 255, 200, 0)
         return
     end
-    setBuildingsLOD(dist)
-    outputChatBox(("modelLODDistance -> %d"):format(dist), 0, 255, 0)
+    setBuildingsLOD(d)
+    outputChatBox(("modelLOD -> %d"):format(d), 0, 255, 0)
 end)
 
-addCommandHandler("blodtarget", function(_, target)
-    if not target or not setBuildingsTarget(target) then
-        outputChatBox("Usage: /blodtarget <object|building|all>", 255, 200, 0)
+addCommandHandler("bscale", function(_, val)
+    local v = tonumber(val)
+    if not v then
+        outputChatBox("Usage: /bscale <value>   (0=без фильтра, 1=по умолчанию, 2=только крупные)", 255, 200, 0)
         return
     end
-    outputChatBox(("target -> %s"):format(target), 0, 255, 0)
+    Config.minScale = v
+    outputChatBox(("minScale -> %.2f (применится после /brebuild)"):format(v), 0, 255, 0)
 end)
 
-addCommandHandler("blodforce", function(_, arg)
-    if arg == nil then
-        outputChatBox("Usage: /blodforce <on|off>", 255, 200, 0)
-        return
-    end
-    local enabled = setBuildingsForceStreamed(arg == "on" or arg == "1" or arg == "true")
-    outputChatBox(("forceObjectsAlwaysStreamed -> %s"):format(enabled and "ON" or "OFF"),
-        0, 255, 0)
+addCommandHandler("brebuild", function()
+    outputChatBox("Rebuilding LODs...", 200, 220, 255)
+    rebuildAllLODs()
 end)
 
-addCommandHandler("blodscan", function()
-    rescanBuildings()
-    outputChatBox("Buildings: re-scanned", 0, 255, 0)
-end)
-
-addCommandHandler("blodinfo", function()
+addCommandHandler("binfo", function()
     local s = getBuildingsStatus()
     outputChatBox(
-        ("farClip=%d fog=%d modelLOD=%d target=%s force=%s | elements=%d models=%d forced=%d")
-        :format(s.farClipDistance, s.fogDistance, s.modelLODDistance,
-                s.target, tostring(s.forceObjectsAlwaysStreamed),
-                s.elementsSeen, s.modelsApplied, s.elementsForced),
+        ("farClip=%d fog=%d modelLOD=%d minScale=%.2f | resources=%d models=%d created=%d skipped=%d")
+        :format(s.farClipDistance, s.fogDistance, s.modelLODDistance, s.minScale,
+                s.resources, s.models, s.created, s.skipped),
         200, 220, 255)
 end)
