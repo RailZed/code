@@ -1,0 +1,10 @@
+<meta>
+    <info author="tembo" type="script" name="custom_buildings_distance" version="1.0.0"
+          description="Increases draw distance for custom buildings via LOD distance (low FPS impact)" />
+
+    <script src="config.lua"   type="client" />
+    <script src="client.lua"   type="client" />
+    <script src="commands.lua" type="client" />
+
+    <min_mta_version client="1.5.8" />
+</meta>
