@@ -80,6 +80,19 @@ local function makeLOD(object)
     local model = getElementModel(object)
     if not modelSet[model] then return end  -- не наш ID — игнорируем
 
+    -- Лёгкий режим: не плодим клоны, опираемся только на
+    -- engineSetModelLODDistance для самой модели.
+    if not Config.useLODClones then
+        applyModelLOD(model)
+        return
+    end
+
+    -- Пропуск breakable — attachElements бьёт по FPS.
+    if Config.skipBreakableLOD and isObjectBreakable(object) then
+        applyModelLOD(model)
+        return
+    end
+
     local x, y, z    = getElementPosition(object)
     local rx, ry, rz = getElementRotation(object)
 
