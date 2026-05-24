@@ -2,25 +2,31 @@
 -- Custom buildings distance — клиентская часть
 -- =====================================================================
 --
--- ВАЖНО про две функции:
---   * setFarClipDistance(d)            — глобальный горизонт камеры.
---                                        БЕЗ этого никакой LOD не покажет
---                                        объект дальше 300 юнитов.
---   * engineSetModelLODDistance(m,d,t) — лимит конкретной модели.
---                                        Третий аргумент `true` снимает
---                                        стандартный потолок 170.
+-- Что мы делаем (по убыванию важности для видимости):
 --
--- Сценарий «видно далеко + FPS не страдает»:
---   1) Поднимаем far clip до 1500.
---   2) Поднимаем LOD distance только у `object`-элементов.
---   3) Ванильные `building` остаются с дефолтным LOD ~170 — Лос-Сантос
---      сам себя оптимизирует.
+--   1. setElementStreamable(obj, false)
+--      — снимает MTA-стримминг с КАЖДОГО кастомного `object`-элемента.
+--        Это и есть то, чего не хватало: без этого MTA сам убирает
+--        объект из сцены за ~300 м, и никакие LOD/far clip не помогут.
+--
+--   2. setFarClipDistance + setFogDistance
+--      — растягиваем горизонт камеры. Без этого даже всегда-в-сцене
+--        объект всё равно не нарисуется.
+--
+--   3. engineSetModelLODDistance(model, d, true)
+--      — снимаем стоковый лимит 170 на конкретной модели.
+--
+-- FPS не страдает: ванильные `building`-элементы остаются с дефолтным
+-- model LOD ~170, то есть весь Лос-Сантос по-прежнему отсекается на
+-- 170 м. Видно далеко только то, что мы сами разрешили.
 -- =====================================================================
 
-local applied            = {}    -- [modelId] = true
+local appliedModels      = {}     -- [modelId] = true
+local streamedElements   = setmetatable({}, { __mode = "k" })  -- weak keys
 local excludeSet         = {}
 local totalModelsApplied = 0
 local totalElementsSeen  = 0
+local totalElementsForced= 0
 
 local function chatLog(r, g, b, fmt, ...)
     outputChatBox("[buildings-distance] " .. fmt:format(...), r, g, b)
@@ -53,30 +59,49 @@ local function enforceFarClip()
 end
 
 -- ----------------------------------------------------------------------
--- Per-model LOD
+-- Model-level LOD
 -- ----------------------------------------------------------------------
 
-local function applyModel(modelId)
+local function applyModelLOD(modelId)
     if type(modelId) ~= "number" or modelId <= 0 then return false end
-    if applied[modelId] then return true end
+    if appliedModels[modelId] then return true end
     if excludeSet[modelId] then return false end
     if not engineSetModelLODDistance then return false end
 
-    -- Третий аргумент `true` снимает лимит 170 (extendedRange).
-    -- В старых MTA третьего аргумента нет — pcall защитит от падения.
     local ok, ret = pcall(engineSetModelLODDistance, modelId, Config.modelLODDistance, true)
     if not ok or ret == false then
         ok = engineSetModelLODDistance(modelId, Config.modelLODDistance)
     end
-
     if ok then
-        applied[modelId] = true
+        appliedModels[modelId] = true
         totalModelsApplied = totalModelsApplied + 1
         dbg("model %d -> LOD %d", modelId, Config.modelLODDistance)
         return true
     end
     return false
 end
+
+-- ----------------------------------------------------------------------
+-- Per-element: вырубаем MTA-стримминг (главный фикс)
+-- ----------------------------------------------------------------------
+
+local function forceAlwaysStreamed(el)
+    if not isElement(el) then return false end
+    if streamedElements[el] then return true end
+    if excludeSet[getElementModel(el)] then return false end
+    if not setElementStreamable then return false end
+
+    if setElementStreamable(el, false) then
+        streamedElements[el] = true
+        totalElementsForced = totalElementsForced + 1
+        return true
+    end
+    return false
+end
+
+-- ----------------------------------------------------------------------
+-- Скан карты
+-- ----------------------------------------------------------------------
 
 local function targetTypes()
     if Config.target == "all" then
@@ -93,54 +118,64 @@ local function applyAll()
     for _, et in ipairs(targetTypes()) do
         for _, el in ipairs(getElementsByType(et)) do
             totalElementsSeen = totalElementsSeen + 1
-            applyModel(getElementModel(el))
+            applyModelLOD(getElementModel(el))
+            -- setElementStreamable имеет смысл только для object,
+            -- ванильные building и так часть мира движка.
+            if Config.forceObjectsAlwaysStreamed and et == "object" then
+                forceAlwaysStreamed(el)
+            end
         end
     end
-    dbg("sweep: %d elements, %d unique models", totalElementsSeen, totalModelsApplied)
+    dbg("sweep: %d elements, %d models, %d forced",
+        totalElementsSeen, totalModelsApplied, totalElementsForced)
 end
 
 -- ----------------------------------------------------------------------
--- Старт ресурса
+-- Старт
 -- ----------------------------------------------------------------------
 
 addEventHandler("onClientResourceStart", resourceRoot, function()
     rebuildExclude()
-
-    -- Сразу растягиваем горизонт — это даёт визуальный эффект мгновенно
     enforceFarClip()
 
     if not engineSetModelLODDistance then
         chatLog(255, 100, 0,
-            "engineSetModelLODDistance недоступна — far clip поднят (%d), но дальние модели могут мерцать",
-            Config.farClipDistance or 0)
-    elseif Config.applyOnResourceStart then
+            "engineSetModelLODDistance недоступна — обнови MTA до 1.5.8+")
+    end
+    if Config.forceObjectsAlwaysStreamed and not setElementStreamable then
+        chatLog(255, 100, 0,
+            "setElementStreamable недоступна в этом MTA — кастомные объекты не покажутся дальше 300м")
+    end
+
+    if Config.applyOnResourceStart then
         applyAll()
     end
 
-    -- Повторные сканы — на случай, если объекты приходят позже
     setTimer(applyAll, 2000,  1)
     setTimer(applyAll, 5000,  1)
     setTimer(applyAll, 15000, 1)
 
-    -- Периодически переустанавливаем far clip / fog, потому что
-    -- погода и сторонние ресурсы их сбрасывают.
     if Config.keepFarClipEnforced then
         setTimer(enforceFarClip, Config.enforceIntervalMs or 1000, 0)
     end
 
-    -- Отчёт в чат — чтобы было видно, что скрипт реально работает
     setTimer(function()
         chatLog(0, 220, 120,
-            "farClip=%d fog=%d modelLOD=%d target=%s | elements=%d models=%d",
+            "farClip=%d fog=%d modelLOD=%d target=%s | elements=%d models=%d forced=%d",
             Config.farClipDistance or 0,
             Config.fogDistance or 0,
             Config.modelLODDistance or 0,
             Config.target,
             totalElementsSeen,
-            totalModelsApplied)
-        if totalModelsApplied == 0 then
+            totalModelsApplied,
+            totalElementsForced)
+        if totalElementsSeen == 0 then
             chatLog(255, 200, 0,
-                "Не нашёл ни одной модели для LOD. Попробуй /blodtarget all и /blodscan.")
+                "Ни одного %s-элемента не найдено. Попробуй /blodtarget all.",
+                Config.target)
+        elseif totalElementsForced == 0 and Config.forceObjectsAlwaysStreamed then
+            chatLog(255, 200, 0,
+                "Ни одного объекта не зафорсили в сцену — возможно у тебя их нет как `object`. Попробуй /blodtarget all.")
         end
     end, 5500, 1)
 end)
@@ -152,12 +187,30 @@ if Config.applyOnStreamIn then
         if want == "object"   and et ~= "object"   then return end
         if want == "building" and et ~= "building" then return end
         if want == "all" and et ~= "object" and et ~= "building" then return end
-        applyModel(getElementModel(source))
+
+        applyModelLOD(getElementModel(source))
+        if Config.forceObjectsAlwaysStreamed and et == "object" then
+            forceAlwaysStreamed(source)
+        end
     end)
 end
 
+-- Ловим вновь созданные объекты (на любом клиенте)
+addEventHandler("onClientElementCreate", root, function()
+    local el = source
+    local et = getElementType(el)
+    if et ~= "object" and et ~= "building" then return end
+    if Config.target == "object"   and et ~= "object"   then return end
+    if Config.target == "building" and et ~= "building" then return end
+    totalElementsSeen = totalElementsSeen + 1
+    applyModelLOD(getElementModel(el))
+    if Config.forceObjectsAlwaysStreamed and et == "object" then
+        forceAlwaysStreamed(el)
+    end
+end)
+
 -- ----------------------------------------------------------------------
--- API для команд / других ресурсов
+-- API
 -- ----------------------------------------------------------------------
 
 function setBuildingsFarClip(distance)
@@ -173,7 +226,7 @@ function setBuildingsLOD(distance)
     distance = tonumber(distance)
     if not distance then return false end
     Config.modelLODDistance = distance
-    for id in pairs(applied) do
+    for id in pairs(appliedModels) do
         local ok = pcall(engineSetModelLODDistance, id, distance, true)
         if not ok then engineSetModelLODDistance(id, distance) end
     end
@@ -186,10 +239,29 @@ function setBuildingsTarget(target)
         return false
     end
     Config.target = target
-    applied = {}
+    appliedModels = {}
+    streamedElements = setmetatable({}, { __mode = "k" })
     totalModelsApplied = 0
+    totalElementsForced = 0
     applyAll()
     return true
+end
+
+function setBuildingsForceStreamed(enabled)
+    Config.forceObjectsAlwaysStreamed = (enabled == true) or (enabled == "on") or (enabled == "1")
+    if Config.forceObjectsAlwaysStreamed then
+        applyAll()
+    else
+        -- Вернуть нормальный стримминг
+        for el in pairs(streamedElements) do
+            if isElement(el) then
+                setElementStreamable(el, true)
+            end
+        end
+        streamedElements = setmetatable({}, { __mode = "k" })
+        totalElementsForced = 0
+    end
+    return Config.forceObjectsAlwaysStreamed
 end
 
 function rescanBuildings()
@@ -198,11 +270,13 @@ end
 
 function getBuildingsStatus()
     return {
-        farClipDistance  = Config.farClipDistance,
-        fogDistance      = Config.fogDistance,
-        modelLODDistance = Config.modelLODDistance,
-        target           = Config.target,
-        elementsSeen     = totalElementsSeen,
-        modelsApplied    = totalModelsApplied,
+        farClipDistance         = Config.farClipDistance,
+        fogDistance             = Config.fogDistance,
+        modelLODDistance        = Config.modelLODDistance,
+        target                  = Config.target,
+        forceObjectsAlwaysStreamed = Config.forceObjectsAlwaysStreamed,
+        elementsSeen            = totalElementsSeen,
+        modelsApplied           = totalModelsApplied,
+        elementsForced          = totalElementsForced,
     }
 end
