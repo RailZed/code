@@ -1,21 +1,36 @@
 -- =====================================================================
--- Команды для подбора дистанции вживую (без перезапуска ресурса)
+-- Команды для подбора значений вживую
 -- =====================================================================
 --
---   /blod <distance>          — задать новую дистанцию (например /blod 500)
---   /blodtarget <object|building|all> — что обрабатывать
---   /blodscan                 — пересканировать карту прямо сейчас
---   /blodinfo                 — текущее состояние
+--   /bfar  <distance>                  — горизонт камеры (главное!)
+--   /blod  <distance>                  — LOD distance для кастомных моделей
+--   /blodtarget <object|building|all>  — что обрабатывать
+--   /blodscan                          — пересканировать карту
+--   /blodinfo                          — текущее состояние
 --
+
+addCommandHandler("bfar", function(_, distArg)
+    local dist = tonumber(distArg)
+    if not dist then
+        outputChatBox("Usage: /bfar <distance>   (например /bfar 1500)", 255, 200, 0)
+        return
+    end
+    if setBuildingsFarClip(dist) then
+        outputChatBox(("farClipDistance -> %d (fog %d)"):format(dist, math.max(50, dist - 100)),
+            0, 255, 0)
+    else
+        outputChatBox("Не удалось применить", 255, 0, 0)
+    end
+end)
 
 addCommandHandler("blod", function(_, distArg)
     local dist = tonumber(distArg)
     if not dist then
-        outputChatBox("Usage: /blod <distance>   (например /blod 500)", 255, 200, 0)
+        outputChatBox("Usage: /blod <distance>   (например /blod 1000)", 255, 200, 0)
         return
     end
-    if setBuildingsDistance(dist) then
-        outputChatBox(("Buildings LOD distance -> %d"):format(dist), 0, 255, 0)
+    if setBuildingsLOD(dist) then
+        outputChatBox(("modelLODDistance -> %d"):format(dist), 0, 255, 0)
     else
         outputChatBox("Не удалось применить", 255, 0, 0)
     end
@@ -27,7 +42,7 @@ addCommandHandler("blodtarget", function(_, target)
         return
     end
     if setBuildingsTarget(target) then
-        outputChatBox(("Buildings LOD target -> %s"):format(target), 0, 255, 0)
+        outputChatBox(("target -> %s"):format(target), 0, 255, 0)
     else
         outputChatBox("Неверный target (object|building|all)", 255, 0, 0)
     end
@@ -39,6 +54,9 @@ addCommandHandler("blodscan", function()
 end)
 
 addCommandHandler("blodinfo", function()
-    outputChatBox(("Buildings LOD: distance=%d, target=%s")
-        :format(Config.distance, Config.target), 200, 220, 255)
+    local s = getBuildingsStatus()
+    outputChatBox(("farClip=%d fog=%d modelLOD=%d target=%s elements=%d models=%d")
+        :format(s.farClipDistance, s.fogDistance, s.modelLODDistance,
+                s.target, s.elementsSeen, s.modelsApplied),
+        200, 220, 255)
 end)

@@ -1,19 +1,28 @@
 -- =====================================================================
--- Автоматическое применение LOD distance к моделям объектов на карте
+-- Custom buildings distance — клиентская часть
 -- =====================================================================
 --
--- ВАЖНО: engineSetModelLODDistance БЕЗ третьего аргумента `true`
--- обрезает значение до 170 (стандартный лимит SA). Поэтому без
--- extendedRange ничего визуально не менялось. Третий параметр
--- `true` разрешает выйти за этот лимит — это и есть фикс.
+-- ВАЖНО про две функции:
+--   * setFarClipDistance(d)            — глобальный горизонт камеры.
+--                                        БЕЗ этого никакой LOD не покажет
+--                                        объект дальше 300 юнитов.
+--   * engineSetModelLODDistance(m,d,t) — лимит конкретной модели.
+--                                        Третий аргумент `true` снимает
+--                                        стандартный потолок 170.
+--
+-- Сценарий «видно далеко + FPS не страдает»:
+--   1) Поднимаем far clip до 1500.
+--   2) Поднимаем LOD distance только у `object`-элементов.
+--   3) Ванильные `building` остаются с дефолтным LOD ~170 — Лос-Сантос
+--      сам себя оптимизирует.
 -- =====================================================================
 
-local applied  = {}      -- [modelId] = true
-local excludeSet = {}
+local applied            = {}    -- [modelId] = true
+local excludeSet         = {}
 local totalModelsApplied = 0
 local totalElementsSeen  = 0
 
-local function notify(r, g, b, fmt, ...)
+local function chatLog(r, g, b, fmt, ...)
     outputChatBox("[buildings-distance] " .. fmt:format(...), r, g, b)
 end
 
@@ -30,26 +39,40 @@ local function rebuildExclude()
     end
 end
 
+-- ----------------------------------------------------------------------
+-- Far clip + fog
+-- ----------------------------------------------------------------------
+
+local function enforceFarClip()
+    if Config.farClipDistance and Config.farClipDistance > 0 then
+        setFarClipDistance(Config.farClipDistance)
+    end
+    if Config.fogDistance and Config.fogDistance > 0 then
+        setFogDistance(Config.fogDistance)
+    end
+end
+
+-- ----------------------------------------------------------------------
+-- Per-model LOD
+-- ----------------------------------------------------------------------
+
 local function applyModel(modelId)
     if type(modelId) ~= "number" or modelId <= 0 then return false end
     if applied[modelId] then return true end
     if excludeSet[modelId] then return false end
     if not engineSetModelLODDistance then return false end
 
-    -- Третий аргумент `true` — extendedRange (обходим лимит 170).
-    -- Если функция не поддерживает 3-й аргумент (очень старый MTA),
-    -- pcall защитит от падения и мы упадём в фолбэк.
-    local ok, ret = pcall(engineSetModelLODDistance, modelId, Config.distance, true)
+    -- Третий аргумент `true` снимает лимит 170 (extendedRange).
+    -- В старых MTA третьего аргумента нет — pcall защитит от падения.
+    local ok, ret = pcall(engineSetModelLODDistance, modelId, Config.modelLODDistance, true)
     if not ok or ret == false then
-        -- Фолбэк: вызов без extendedRange — значение будет clamp'нуто,
-        -- но хотя бы не упадёт. Обнови MTA до 1.5.8+, чтобы работало по-настоящему.
-        ok = engineSetModelLODDistance(modelId, Config.distance)
+        ok = engineSetModelLODDistance(modelId, Config.modelLODDistance)
     end
 
     if ok then
         applied[modelId] = true
         totalModelsApplied = totalModelsApplied + 1
-        dbg("model %d -> LOD %d", modelId, Config.distance)
+        dbg("model %d -> LOD %d", modelId, Config.modelLODDistance)
         return true
     end
     return false
@@ -76,32 +99,48 @@ local function applyAll()
     dbg("sweep: %d elements, %d unique models", totalElementsSeen, totalModelsApplied)
 end
 
+-- ----------------------------------------------------------------------
+-- Старт ресурса
+-- ----------------------------------------------------------------------
+
 addEventHandler("onClientResourceStart", resourceRoot, function()
     rebuildExclude()
 
-    if not engineSetModelLODDistance then
-        notify(255, 0, 0, "engineSetModelLODDistance недоступна — обнови MTA")
-        return
-    end
+    -- Сразу растягиваем горизонт — это даёт визуальный эффект мгновенно
+    enforceFarClip()
 
-    if Config.applyOnResourceStart then
+    if not engineSetModelLODDistance then
+        chatLog(255, 100, 0,
+            "engineSetModelLODDistance недоступна — far clip поднят (%d), но дальние модели могут мерцать",
+            Config.farClipDistance or 0)
+    elseif Config.applyOnResourceStart then
         applyAll()
     end
 
-    -- Несколько повторных сканов: объекты из других ресурсов могут
-    -- появиться чуть позже стартового тика.
+    -- Повторные сканы — на случай, если объекты приходят позже
     setTimer(applyAll, 2000,  1)
     setTimer(applyAll, 5000,  1)
     setTimer(applyAll, 15000, 1)
 
-    -- Покажем итог в чат, чтобы было видно, что скрипт реально отработал
+    -- Периодически переустанавливаем far clip / fog, потому что
+    -- погода и сторонние ресурсы их сбрасывают.
+    if Config.keepFarClipEnforced then
+        setTimer(enforceFarClip, Config.enforceIntervalMs or 1000, 0)
+    end
+
+    -- Отчёт в чат — чтобы было видно, что скрипт реально работает
     setTimer(function()
-        notify(0, 220, 120,
-            "distance=%d, target=%s, elements=%d, models=%d",
-            Config.distance, Config.target, totalElementsSeen, totalModelsApplied)
+        chatLog(0, 220, 120,
+            "farClip=%d fog=%d modelLOD=%d target=%s | elements=%d models=%d",
+            Config.farClipDistance or 0,
+            Config.fogDistance or 0,
+            Config.modelLODDistance or 0,
+            Config.target,
+            totalElementsSeen,
+            totalModelsApplied)
         if totalModelsApplied == 0 then
-            notify(255, 200, 0,
-                "Ни одной модели не найдено. Попробуй /blodtarget all, или проверь что объекты заспавнены.")
+            chatLog(255, 200, 0,
+                "Не нашёл ни одной модели для LOD. Попробуй /blodtarget all и /blodscan.")
         end
     end, 5500, 1)
 end)
@@ -117,20 +156,27 @@ if Config.applyOnStreamIn then
     end)
 end
 
--- =====================================================================
--- Публичное API
--- =====================================================================
+-- ----------------------------------------------------------------------
+-- API для команд / других ресурсов
+-- ----------------------------------------------------------------------
 
-function setBuildingsDistance(distance)
+function setBuildingsFarClip(distance)
     distance = tonumber(distance)
     if not distance then return false end
-    Config.distance = distance
-    -- Переприменяем ко всем обработанным
+    Config.farClipDistance = distance
+    Config.fogDistance = math.max(50, distance - 100)
+    enforceFarClip()
+    return true
+end
+
+function setBuildingsLOD(distance)
+    distance = tonumber(distance)
+    if not distance then return false end
+    Config.modelLODDistance = distance
     for id in pairs(applied) do
-        local ok, _ = pcall(engineSetModelLODDistance, id, distance, true)
+        local ok = pcall(engineSetModelLODDistance, id, distance, true)
         if not ok then engineSetModelLODDistance(id, distance) end
     end
-    -- И досканируем
     applyAll()
     return true
 end
@@ -148,4 +194,15 @@ end
 
 function rescanBuildings()
     applyAll()
+end
+
+function getBuildingsStatus()
+    return {
+        farClipDistance  = Config.farClipDistance,
+        fogDistance      = Config.fogDistance,
+        modelLODDistance = Config.modelLODDistance,
+        target           = Config.target,
+        elementsSeen     = totalElementsSeen,
+        modelsApplied    = totalModelsApplied,
+    }
 end
