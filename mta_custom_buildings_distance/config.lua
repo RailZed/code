@@ -63,11 +63,20 @@ Config.enforceIntervalMs   = 2000
 -- для самой модели — движок рисует её издалека БЕЗ доп. объекта.
 -- Для большинства карт этого достаточно.
 --
--- useLODClones = false  → только engineSetModelLODDistance (лёгкий режим)
--- useLODClones = true   → создавать LOD-клоны (старое поведение)
+-- useLODClones = false  → только engineSetModelLODDistance (лёгкий режим,
+--                          но для многих кастомных моделей здания вдалеке
+--                          просто не появятся — движок их не рисует без клона)
+-- useLODClones = true   → создавать LOD-клоны со streamable=false.
+--                          streamable=false критично — без него движок
+--                          гоняет стриммер для каждого LOD-клона каждый
+--                          кадр (это и было источником просадки FPS).
 --
--- Если после false далёкие здания исчезают совсем — переключи в true.
-Config.useLODClones = false
+-- По умолчанию true — иначе зданий вдалеке не видно для большинства моделей.
+Config.useLODClones = true
+
+-- Делать LOD-клоны не-стримящимися. Должно быть true в 99% случаев.
+-- false — только если вдруг RAM критически мало и есть тысячи LOD'ов.
+Config.lodNotStreamable = true
 
 -- Не создавать LOD-клон для breakable-объектов (даже если useLODClones=true).
 -- Breakable LOD'ы используют attachElements — это пересчёт позиции

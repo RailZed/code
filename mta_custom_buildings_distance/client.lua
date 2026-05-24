@@ -99,6 +99,12 @@ local function makeLOD(object)
     local lod = createObject(model, x, y, z, rx, ry, rz, true)  -- low-LOD
     if not lod then return end
 
+    -- Критично: убираем LOD-клон из стриминга. Иначе движок
+    -- пересчитывает стриминг для каждого клона каждый кадр.
+    if Config.lodNotStreamable then
+        setElementStreamable(lod, false)
+    end
+
     if lodParent and isElement(lodParent) then
         setElementParent(lod, lodParent)
     end
