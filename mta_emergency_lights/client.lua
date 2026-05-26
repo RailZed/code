@@ -2,16 +2,15 @@
 -- Client — бинды, состояние, диагностика
 -- =====================================================================
 --
--- Состояние мигалок хранится локально (localState). Это нужно чтобы
--- мигалки работали и на одиночном/тестовом сервере, где синк elementData
--- может отвалиться по правам.
---
--- Если сервер прислал свежий elementData "vehicle:els:modes" — он имеет
--- приоритет: так гарантируем что другие игроки видят то же, что и
--- водитель.
+-- Все сообщения в чат — БЕЗУСЛОВНЫЕ (не зависят от Config.announce),
+-- чтобы при поломке пользователь видел ровно где обрывается цепочка.
 -- =====================================================================
 
 local localState = setmetatable({}, { __mode = "k" })
+
+local function chat(text, r, g, b)
+    outputChatBox("[ELS] " .. text, r or 200, g or 220, b or 255)
+end
 
 function getActiveModes(veh)
     if not isElement(veh) then return nil end
@@ -31,48 +30,36 @@ local function setLocalMode(veh, modeName, state)
     end
 end
 
--- ----------------------------------------------------------------------
--- Переключение
--- ----------------------------------------------------------------------
-
 local function getMyVehicle()
     local veh = getPedOccupiedVehicle(localPlayer)
-    if not veh then return nil end
-    if getVehicleController(veh) ~= localPlayer then return nil end
+    if not veh then return nil, "не в машине" end
+    if getVehicleController(veh) ~= localPlayer then return nil, "не водитель" end
     return veh
 end
 
 local function requestToggle(modeName)
-    local vehicle = getMyVehicle()
+    local vehicle, reason = getMyVehicle()
     if not vehicle then
-        if Config.announce then
-            outputChatBox("[Мигалки] Сядь за руль", 255, 150, 0)
-        end
+        chat("toggle: " .. reason, 255, 150, 0)
         return
     end
 
     if not hasVehicleMode(vehicle, modeName) then
-        if Config.announce then
-            outputChatBox(("[Мигалки] Режим '%s' не настроен"):format(modeName),
-                255, 150, 0)
-        end
+        chat(("режим '%s' не настроен для этой модели"):format(modeName), 255, 150, 0)
         return
     end
 
-    -- Локально переключаем сразу — мгновенный отклик
-    local current = (localState[vehicle] and localState[vehicle][modeName]) and true or false
-    local newState = not current
+    local cur = (localState[vehicle] and localState[vehicle][modeName]) and true or false
+    local newState = not cur
     setLocalMode(vehicle, modeName, newState)
 
-    -- Сервер пусть синканёт другим клиентам, но это не критично для рендера
     triggerServerEvent("emergencyLights:toggleMode", localPlayer, vehicle, modeName, newState)
 
-    if Config.announce then
-        outputChatBox(
-            ("[Мигалки] %s — %s"):format(modeName, newState and "ВКЛ" or "выкл"),
-            newState and 0 or 200, 220, newState and 255 or 0
-        )
-    end
+    chat(
+        ("%s — %s (model=%d)"):format(modeName, newState and "ВКЛ" or "выкл",
+            getElementModel(vehicle)),
+        newState and 0 or 200, 220, newState and 255 or 0
+    )
 end
 
 -- ----------------------------------------------------------------------
@@ -104,30 +91,24 @@ local function cmdEls(_, modeName)
     requestToggle(modeName or "primary")
 end
 
--- /elsinfo — показать что вообще происходит
 local function cmdInfo()
+    chat("--- info ---", 255, 200, 0)
     local veh = getPedOccupiedVehicle(localPlayer)
-    outputChatBox("--- ELS info ---", 255, 200, 0)
-
     if not veh then
-        outputChatBox("Ты не в машине.", 255, 200, 0)
+        chat("ты не в машине", 255, 200, 0)
     else
         local model = getElementModel(veh)
-        outputChatBox(("Машина: model=%d (%s)"):format(
-            model, getVehicleName(veh) or "?"), 255, 200, 0)
-
+        chat(("машина model=%d (%s)"):format(model, getVehicleName(veh) or "?"), 255, 200, 0)
         local hasCustom = isCustomLightModel(model)
-        outputChatBox(("Конфиг для этой модели: %s"):format(
-            hasCustom and "собственный" or "GENERIC (4 угла крыши)"),
-            255, 200, 0)
+        chat(("конфиг: %s"):format(hasCustom and "СВОЙ" or "GENERIC"), 255, 200, 0)
 
         local modes = getVehicleModes(veh)
         local list = {}
         if modes then
             for name in pairs(modes) do list[#list+1] = name end
         end
-        outputChatBox(("Доступные режимы: %s"):format(
-            #list > 0 and table.concat(list, ", ") or "—"), 255, 200, 0)
+        chat(("режимы: %s"):format(#list > 0 and table.concat(list, ", ") or "—"),
+            255, 200, 0)
 
         local active = getActiveModes(veh)
         local on = {}
@@ -136,19 +117,20 @@ local function cmdInfo()
                 if st then on[#on+1] = name end
             end
         end
-        outputChatBox(("Сейчас включено: %s"):format(
+        chat(("сейчас включено: %s"):format(
             #on > 0 and table.concat(on, ", ") or "ничего"), 255, 200, 0)
     end
 
-    -- Шейдер
-    outputChatBox(("Шейдер: %s | текстура: %s"):format(
-        isShaderReady() and "ОК" or "НЕ ЗАГРУЖЕН",
-        isTextureReady() and "ОК" or "НЕ ЗАГРУЖЕНА"),
-        255, 200, 0)
+    chat(("шейдер: %s | текстура: %s"):format(
+        isShaderReady() and "ОК" or "НЕТ",
+        isTextureReady() and "ОК" or "НЕТ"), 255, 200, 0)
+
+    -- сколько бинд-keys удалось зарегистрировать
+    local n = 0
+    for _ in pairs(boundKeys) do n = n + 1 end
+    chat(("биндов активно: %d"):format(n), 255, 200, 0)
 end
 
--- /elsapply [modelId] — добавить generic-конфиг для текущей или указанной
--- модели машины (на клиенте, без серверного синка)
 local function cmdApply(_, modelArg)
     local model = tonumber(modelArg)
     if not model then
@@ -156,23 +138,21 @@ local function cmdApply(_, modelArg)
         if veh then model = getElementModel(veh) end
     end
     if not model then
-        outputChatBox("[ELS] /elsapply <modelId>  — или сядь за руль", 255, 150, 0)
+        chat("/elsapply <modelId>  — или сядь за руль", 255, 150, 0)
         return
     end
     addCustomLights(model, genericLights)
-    outputChatBox(("[ELS] Generic-мигалки навешены на model %d"):format(model),
-        0, 220, 120)
+    chat(("generic-мигалки навешены на model %d"):format(model), 0, 220, 120)
 end
 
--- /elstest — для текущей машины включить primary насильно
 local function cmdTest()
-    local veh = getMyVehicle()
+    local veh, reason = getMyVehicle()
     if not veh then
-        outputChatBox("[ELS] Сядь за руль для /elstest", 255, 150, 0)
+        chat("test: " .. (reason or "?"), 255, 150, 0)
         return
     end
     setLocalMode(veh, "primary", true)
-    outputChatBox("[ELS] primary включён локально", 0, 220, 120)
+    chat("primary включён ЛОКАЛЬНО (без сервера)", 0, 220, 120)
 end
 
 -- ----------------------------------------------------------------------
@@ -186,6 +166,9 @@ addEventHandler("onClientResourceStart", resourceRoot, function()
     addCommandHandler("elsinfo",  cmdInfo)
     addCommandHandler("elsapply", cmdApply)
     addCommandHandler("elstest",  cmdTest)
+
+    chat("ресурс запущен. /elsinfo — диагностика. /elstest — пробный режим.",
+        0, 220, 120)
 end)
 
 addEventHandler("onClientResourceStop", resourceRoot, function()
