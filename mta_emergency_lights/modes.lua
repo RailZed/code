@@ -12,22 +12,23 @@
 -- "цепочки" вспышек.
 -- =====================================================================
 
--- Базовый "ELS"-режим: чередующиеся левая/правая стороны крыши + быстрые
--- двойные подмигивания. Используется на 596 (Premier) и совместимых.
+-- Базовый "ELS"-режим для 596: 6 лампочек у решётки.
+-- Группы: 1 = синие, 2 = красные, 3 = белые.
+-- Паттерн: двойная вспышка синих → двойная вспышка красных → вспышка белых.
 local function premierMode()
     return {
-        delay = 70,
-        -- "right cluster" быстрая двойная вспышка
-        { [1] = true, [3] = true, [4] = true },
+        delay = 80,
+        { [1] = true },          -- синие
         { },
-        { [1] = true, [3] = true, [4] = true },
+        { [1] = true },          -- синие (двойной флик)
         { },
+        { [2] = true },          -- красные
         { },
-        -- "left cluster" быстрая двойная вспышка
-        { [2] = true, [5] = true, [6] = true },
+        { [2] = true },          -- красные (двойной флик)
         { },
-        { [2] = true, [5] = true, [6] = true },
+        { [3] = true },          -- белые
         { },
+        { [1] = true, [2] = true }, -- финал: синие+красные вместе
         { },
     }
 end
@@ -43,7 +44,7 @@ local function panicMode()
     }
 end
 
--- Белый строб по крыше (group 7)
+-- Белый строб по крыше (group 7 — для машин с крышной полосой)
 local function strobeMode()
     return {
         delay = 60,
@@ -53,6 +54,29 @@ local function strobeMode()
         { },
         { },
         { },
+    }
+end
+
+-- Белый строб у решётки (group 3 — для 596 с лампочками возле решётки)
+local function whiteStrobeMode()
+    return {
+        delay = 55,
+        { [3] = true },
+        { },
+        { [3] = true },
+        { },
+        { },
+    }
+end
+
+-- "Паника" синие+красные одновременно у решётки
+local function grilleAlternateMode()
+    return {
+        delay = 100,
+        { [1] = true },
+        { [2] = true },
+        { [1] = true },
+        { [2] = true },
     }
 end
 
@@ -95,10 +119,9 @@ end
 
 local vehicleModes = {
     [596] = {
-        primary   = premierMode(),
-        secondary = strobeMode(),
-        takedown  = takedownMode(),
-        arrow     = arrowMode(),
+        primary   = premierMode(),         -- синие-красные-белые цикл
+        secondary = grilleAlternateMode(), -- левый/правый паник
+        takedown  = whiteStrobeMode(),     -- белый строб
     },
     [597] = genericModes(),
     [598] = genericModes(),
