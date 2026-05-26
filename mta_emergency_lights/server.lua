@@ -1,10 +1,14 @@
 -- =====================================================================
--- Server — переключение режимов через elementData
+-- Server — синк включения мигалок другим игрокам
 -- =====================================================================
 --
--- Клиент шлёт ("vehicle", "modeName"). Сервер инвертирует флаг и кладёт
--- его в elementData "vehicle:els:modes" — этот ключ синкается на всех
--- игроков, и render.lua на каждом клиенте сразу подхватывает изменения.
+-- Клиент стал authoritative: режимы переключаются у него локально.
+-- Сюда он шлёт уже готовое состояние (modeName -> bool). Мы пишем
+-- его в elementData с syncToOtherClients=true, чтобы другие игроки
+-- тоже увидели мигалки.
+--
+-- Если в ACL запрещено setElementData — клиент всё равно увидит свои
+-- мигалки (благодаря локальному состоянию), просто другие не увидят.
 -- =====================================================================
 
 local function getModes(vehicle)
@@ -14,24 +18,21 @@ local function getModes(vehicle)
 end
 
 addEvent("emergencyLights:toggleMode", true)
-addEventHandler("emergencyLights:toggleMode", root, function(vehicle, modeName)
+addEventHandler("emergencyLights:toggleMode", root,
+function(vehicle, modeName, newState)
     if not isElement(vehicle) or getElementType(vehicle) ~= "vehicle" then return end
     if getVehicleOccupant(vehicle, 0) ~= client then return end
     if type(modeName) ~= "string" or modeName == "" then return end
 
     local modes = getModes(vehicle)
-    local new   = not modes[modeName]
-    modes[modeName] = new or nil   -- nil чтобы не копились ложные ключи
+    if newState then
+        modes[modeName] = true
+    else
+        modes[modeName] = nil
+    end
     setElementData(vehicle, "vehicle:els:modes", modes)
-
-    triggerClientEvent(client, "emergencyLights:notify", client, modeName, new == true)
 end)
 
--- Сбрасываем мигалки при респавне (иначе зомби-мигалки на пустой машине)
 addEventHandler("onVehicleRespawn", root, function()
     setElementData(source, "vehicle:els:modes", {})
-end)
-
-addEventHandler("onVehicleExit", root, function(player, seat)
-    -- ничего не делаем — если водитель вышел, мигалки могут продолжать гореть
 end)

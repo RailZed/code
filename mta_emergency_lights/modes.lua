@@ -86,6 +86,13 @@ end
 -- Привязка режимов к моделям
 -- ----------------------------------------------------------------------
 
+local function genericModes()
+    return {
+        primary   = panicMode(),
+        secondary = strobeMode(),
+    }
+end
+
 local vehicleModes = {
     [596] = {
         primary   = premierMode(),
@@ -93,22 +100,10 @@ local vehicleModes = {
         takedown  = takedownMode(),
         arrow     = arrowMode(),
     },
-    [597] = {
-        primary   = panicMode(),
-        secondary = strobeMode(),
-    },
-    [598] = {
-        primary   = panicMode(),
-        secondary = strobeMode(),
-    },
-    [416] = {
-        primary   = panicMode(),
-        secondary = strobeMode(),
-    },
-    [407] = {
-        primary   = panicMode(),
-        secondary = strobeMode(),
-    },
+    [597] = genericModes(),
+    [598] = genericModes(),
+    [416] = genericModes(),
+    [407] = genericModes(),
 }
 
 -- Каждой машине нужны *свои* счётчики анимации (last/index), иначе все
@@ -136,9 +131,8 @@ function getVehicleModes(veh)
     local cached = perVehicleModes[veh]
     if cached then return cached end
 
-    local proto = vehicleModes[getElementModel(veh)]
-    if not proto then return nil end
-
+    -- Для любой машины без явной записи берём generic набор.
+    local proto = vehicleModes[getElementModel(veh)] or genericModes()
     local instance = cloneModes(proto)
     perVehicleModes[veh] = instance
     return instance

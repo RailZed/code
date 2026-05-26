@@ -45,7 +45,7 @@ local function drawVehicleLights(veh)
     local modes = getVehicleModes(veh)
     if not modes then return end
 
-    local activeModes = getElementData(veh, "vehicle:els:modes")
+    local activeModes = getActiveModes(veh)
     if type(activeModes) ~= "table" then return end
 
     -- Хоть один режим включён?

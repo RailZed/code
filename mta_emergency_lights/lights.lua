@@ -155,10 +155,46 @@ lights = {
     },
 }
 
+-- ---------------- Generic fallback (любая модель) ---------------------
+-- Используется, если конкретного ID нет в таблице. Сразу даёт мигалки
+-- на любой машине: 4 угла крыши + 2 белых стробоскопа.
+genericLights = {
+    blasts = {
+        { { -0.55,  0.40, 0.95 }, {   0,   0, 255, 140 }, 1.3, 1 },
+        { {  0.55,  0.40, 0.95 }, { 255,   0,   0, 140 }, 1.3, 2 },
+        { { -0.55, -0.40, 0.95 }, { 255,   0,   0, 140 }, 1.3, 2 },
+        { {  0.55, -0.40, 0.95 }, {   0,   0, 255, 140 }, 1.3, 1 },
+        { {  0.00,  0.00, 1.00 }, { 255, 255, 255,  80 }, 0.9, 7 },
+    },
+    lights = {
+        { { -0.55,  0.40, 0.95 }, { 255, 255, 255, 230 }, 0.10, 1 },
+        { {  0.55,  0.40, 0.95 }, { 255, 255, 255, 230 }, 0.10, 2 },
+        { { -0.55, -0.40, 0.95 }, { 255, 255, 255, 230 }, 0.10, 2 },
+        { {  0.55, -0.40, 0.95 }, { 255, 255, 255, 230 }, 0.10, 1 },
+        { {  0.00,  0.00, 1.00 }, { 255, 255, 255, 255 }, 0.08, 7 },
+    },
+}
+
+-- Куда применять generic. Если nil — на ВСЕ модели без своего конфига.
+-- Можно подкинуть карту [modelId] = customConfig через addCustomLights.
+local overrides = {}
+
 function getVehicleLights(veh)
+    local model
     if type(veh) == "number" then
-        return lights[veh]
+        model = veh
+    elseif isElement(veh) then
+        model = getElementModel(veh)
+    else
+        return nil
     end
-    if not isElement(veh) then return nil end
-    return lights[getElementModel(veh)]
+    return overrides[model] or lights[model] or genericLights
+end
+
+function addCustomLights(modelId, def)
+    overrides[tonumber(modelId)] = def
+end
+
+function isCustomLightModel(modelId)
+    return lights[modelId] ~= nil or overrides[modelId] ~= nil
 end

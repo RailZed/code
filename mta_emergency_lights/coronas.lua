@@ -1,43 +1,62 @@
 -- =====================================================================
--- Coronas — очередь и батчевый рендер через DX-шейдер
--- =====================================================================
---
--- Идея:
---   render.lua за кадр собирает все видимые лампочки (queueCorona),
---   а в конце кадра drawCoronas() заливает их пачками по 12 штук в
---   шейдер data/corona.fx и рендерит одним вызовом dxDrawMaterialLine3D.
---
--- Этот батчинг — главное, почему ELS не сажает FPS: за 1 материал-вызов
--- отрисовывается 12 корон, а не по одной на каждую лампочку.
+-- Coronas — DX-шейдер очередь + fallback на dxDrawMaterialLine3D
 -- =====================================================================
 
 local coronas    = {}
 local coronaTxt  = nil
 local shader     = nil
+local shaderErr  = nil
+local triedShader = false
 
-local function ensureShader()
+-- ----------------------------------------------------------------------
+-- Инициализация ресурсов
+-- ----------------------------------------------------------------------
+local function ensureTexture()
+    if isElement(coronaTxt) then return true end
+    coronaTxt = dxCreateTexture("data/blast.png")
     if not coronaTxt then
-        coronaTxt = dxCreateTexture("data/blast.png")
-    end
-    if not shader or not isElement(shader) then
-        shader = dxCreateShader("data/corona.fx")
-        if shader and coronaTxt then
-            dxSetShaderValue(shader, "gCoronaTexture", coronaTxt)
-            dxSetShaderValue(shader, "drawSize", Config.shaderDrawSize or 50)
+        if Config.announce then
+            outputChatBox("[ELS] Не удалось загрузить data/blast.png", 255, 80, 80)
         end
+        return false
     end
-    return shader ~= nil
+    return true
 end
 
-addEventHandler("onClientResourceStart", resourceRoot, function()
-    ensureShader()
-    if Config.debug then
-        outputDebugString("[emergency_lights] shader ok: " .. tostring(shader ~= nil), 3)
+local function ensureShader()
+    if not ensureTexture() then return false end
+    if isElement(shader) then return true end
+    if triedShader and not shader then return false end
+    triedShader = true
+
+    local ok, err = dxCreateShader("data/corona.fx")
+    if not ok then
+        shader, shaderErr = nil, tostring(err)
+        if Config.announce then
+            outputChatBox(
+                ("[ELS] Шейдер corona.fx не скомпилировался: %s"):format(shaderErr),
+                255, 80, 80
+            )
+            outputChatBox("[ELS] Включаю fallback-рендер (без батчинга).", 255, 200, 0)
+        end
+        return false
     end
+    shader = ok
+    dxSetShaderValue(shader, "gCoronaTexture", coronaTxt)
+    dxSetShaderValue(shader, "drawSize", Config.shaderDrawSize or 50)
+    return true
+end
+
+function isShaderReady()  return isElement(shader) end
+function isTextureReady() return isElement(coronaTxt) end
+
+addEventHandler("onClientResourceStart", resourceRoot, function()
+    ensureTexture()
+    ensureShader()
 end)
 
 addEventHandler("onClientResourceStop", resourceRoot, function()
-    if isElement(shader) then destroyElement(shader) end
+    if isElement(shader)    then destroyElement(shader) end
     if isElement(coronaTxt) then destroyElement(coronaTxt) end
 end)
 
@@ -53,16 +72,15 @@ function queueCorona(x, y, z, size, color)
 end
 
 -- ----------------------------------------------------------------------
--- Локальные шорткаты (минус JIT-промахи)
+-- Шорткаты
 -- ----------------------------------------------------------------------
-local dxSetShaderValue       = dxSetShaderValue
-local dxDrawMaterialLine3D   = dxDrawMaterialLine3D
+local dxSetShaderValue           = dxSetShaderValue
+local dxDrawMaterialLine3D       = dxDrawMaterialLine3D
 local getScreenFromWorldPosition = getScreenFromWorldPosition
 local getDistanceBetweenPoints3D = getDistanceBetweenPoints3D
-local getCameraMatrix        = getCameraMatrix
-local getFarClipDistance     = getFarClipDistance
+local getCameraMatrix            = getCameraMatrix
+local getFarClipDistance         = getFarClipDistance
 
--- Буферы для шейдер-констант (12 корон = 3 "линии" по 4 точки)
 local renderPos   = { [0] = {}, [1] = {}, [2] = {} }
 local renderColor = { [0] = {}, [1] = {}, [2] = {} }
 
@@ -74,20 +92,56 @@ local function zeroBuffers()
 end
 
 -- ----------------------------------------------------------------------
--- Слив очереди в шейдер
+-- Fallback: рисуем каждую корону отдельным dxDrawMaterialLine3D с textuRE.
+-- Медленнее, но не зависит от шейдера.
 -- ----------------------------------------------------------------------
-function drawCoronas()
-    if not ensureShader() then
+local function drawFallback()
+    if not ensureTexture() then
         coronas = {}
         return
     end
+    local cx, cy, cz = getCameraMatrix()
+    local maxDist = Config.maxDrawDistance or 250
+    for i = 1, #coronas do
+        local c = coronas[i]
+        local x, y, z = c[1], c[2], c[3]
+        if getScreenFromWorldPosition(x, y, z, 0.1)
+           and getDistanceBetweenPoints3D(x, y, z, cx, cy, cz) <= maxDist
+        then
+            local r, g, b, a = c[4], c[5], c[6], c[7]
+            local color = tocolor(r, g, b, a)
+            local size  = c.size * 2
+            -- Простая билборд-линия "к камере"
+            local dx, dy = cx - x, cy - y
+            local len = math.sqrt(dx*dx + dy*dy)
+            if len > 0 then dx, dy = dx/len, dy/len end
+            local px, py = -dy, dx -- перпендикуляр в горизонтали
+            dxDrawMaterialLine3D(
+                x - px * size, y - py * size, z,
+                x + px * size, y + py * size, z,
+                coronaTxt, size * 2, color,
+                x, y, z + 1
+            )
+        end
+    end
+    coronas = {}
+end
+
+-- ----------------------------------------------------------------------
+-- Основной слив очереди
+-- ----------------------------------------------------------------------
+function drawCoronas()
+    if #coronas == 0 then return end
+
+    if not ensureShader() then
+        return drawFallback()
+    end
 
     local cx, cy, cz = getCameraMatrix()
-    dxSetShaderValue(shader, "drawPos",  cx, cy, cz)
-    dxSetShaderValue(shader, "farClip",  getFarClipDistance())
+    dxSetShaderValue(shader, "drawPos", cx, cy, cz)
+    dxSetShaderValue(shader, "farClip", getFarClipDistance())
 
-    local maxDist = Config.maxDrawDistance or 250
-
+    local maxDist     = Config.maxDrawDistance or 250
     local renderIndex = 0
     local pending     = false
     local vectorStart = Vector3(cx, cy, cz + 50)
@@ -121,9 +175,7 @@ function drawCoronas()
             end
         end
 
-        -- Каждые 12 корон или на последней итерации — flush
         if pending and (renderIndex % 12 == 0 or i == count) then
-            -- Добиваем пустыми, если не до конца
             while renderIndex % 12 ~= 0 do
                 local slot  = renderIndex % 4
                 local line  = math.floor((renderIndex / 4)) % 3
